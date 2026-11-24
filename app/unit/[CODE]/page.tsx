@@ -1,17 +1,10 @@
 import Link from "next/link";
 import { Suspense } from "react";
 import { fakeLocations } from "@/lib/fake-locations";
-import { parties as partyDefinitions } from "@/lib/parties";
+import { getActiveParties, isPartyFallback, partiesLoadError } from "@/lib/parties.server";
 import { StatusTag, type StatusKey } from "@/components/StatusTag";
 
 export const instant = false;
-
-const parties = partyDefinitions.map((party, index) => ({
-	name: party.name,
-	abbr: party.abbreviation,
-	our: 82 - index * 3,
-	ireV: index === 1 ? 62 : 82 - index * 3,
-}));
 
 const statusStyles: Record<
 	string,
@@ -98,7 +91,7 @@ export default async function UnitPage({
 	searchParams: Promise<{ state?: string }>;
 }) {
 	return (
-		<Suspense fallback={null}>
+		<Suspense fallback={<p className="px-4 py-10 text-muted">Loading parties?</p>}>
 			<UnitPageContent params={params} searchParams={searchParams} />
 		</Suspense>
 	);
@@ -114,6 +107,19 @@ async function UnitPageContent({
 	const { CODE } = await params;
 	const { state = "none" } = await searchParams;
 	const code = decodeURIComponent(CODE);
+	let activeParties;
+	try {
+		activeParties = await getActiveParties();
+	} catch {
+		return <p role="alert" className="px-4 py-10 text-muted">{partiesLoadError}</p>;
+	}
+
+	const parties = activeParties.map((party, index) => {
+		const our = Math.max(0, 82 - index * 3);
+		return { ...party, our, ireV: index === 1 ? 62 : our };
+	});
+	const valid = parties.reduce((total, party) => total + party.our, 0);
+	const rejected = 8;
 
 	let unit = null as null | {
 		name: string;
@@ -157,6 +163,7 @@ async function UnitPageContent({
 
 	return (
 		<main className="px-4 pb-10 pt-6 md:px-8 lg:px-10">
+			{isPartyFallback(activeParties) && <p role="alert" className="mb-4 text-muted">{partiesLoadError}</p>}
 			<div className="mx-auto max-w-[760px]">
 				<nav
 					aria-label="Breadcrumb"
@@ -204,7 +211,7 @@ async function UnitPageContent({
 									<tbody>
 										{parties.map((party) => (
 											<tr
-												key={party.abbr}
+												key={party.id}
 												className="border-b border-line last:border-b-0"
 											>
 												<th
@@ -213,7 +220,7 @@ async function UnitPageContent({
 												>
 													{party.name}{" "}
 													<span className="ml-1 font-medium text-muted">
-														({party.abbr})
+														({party.abbreviation})
 													</span>
 												</th>
 												<td className="px-3 py-3 text-right font-bold text-ink md:px-4">
@@ -222,11 +229,11 @@ async function UnitPageContent({
 											</tr>
 										))}
 										{[
-											["Total accredited voters", "420"],
-											["Total valid votes", "412"],
-											["Total rejected votes", "8"],
+											["Total accredited voters", String(valid + rejected)],
+											["Total valid votes", String(valid)],
+											["Total rejected votes", String(rejected)],
 										].map(([label, score]) => (
-											<tr className="border-t border-line bg-[#F7FAF8]">
+											<tr key={label} className="border-t border-line bg-[#F7FAF8]">
 												<th
 													scope="row"
 													className="px-3 py-3 text-left font-bold text-ink md:px-4"
@@ -272,10 +279,10 @@ async function UnitPageContent({
 										<tbody>
 											{parties.map((party) => {
 												const differs = party.our !== party.ireV;
-												const difference = party.ireV - party.our;
+												const difference = party.our - party.ireV;
 												return (
 													<tr
-														key={party.abbr}
+														key={party.id}
 														className={`border-b border-line last:border-b-0 ${
 															differs ? "bg-[#FDE7E5]" : "bg-white"
 														}`}
@@ -286,7 +293,7 @@ async function UnitPageContent({
 														>
 															{party.name}{" "}
 															<span className="font-medium text-muted">
-																({party.abbr})
+																({party.abbreviation})
 															</span>
 														</th>
 														<td className="px-3 py-3 text-right font-bold text-ink">
@@ -405,11 +412,11 @@ async function UnitPageContent({
 											<div className="border-t border-line px-4 py-3 text-sm">
 												{parties.map((party) => (
 													<p
-														key={party.abbr}
+														key={party.id}
 														className="flex justify-between border-b border-line py-2 last:border-b-0"
 													>
 														<span>
-															{party.name} ({party.abbr})
+															{party.name} ({party.abbreviation})
 														</span>
 														<strong>{party.our}</strong>
 													</p>

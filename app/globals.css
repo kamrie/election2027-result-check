@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+
+@theme {
+  --color-brand: #008751;
+  --color-brand-dark: #005C37;
+  --color-ink: #14201A;
+  --color-muted: #5A6560;
+  --color-line: #D9DDDA;
+  --color-page: #F2F5F3;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--color-page);
+}
+
+body {
+  margin: 0;
+  background: var(--color-page);
+  color: #14201A;
+  font-family: "Montserrat Variable", Arial, Helvetica, sans-serif;
+}
+
+a {
+  text-decoration: none;
+}
+
+img,
+svg {
+  display: block;
+}

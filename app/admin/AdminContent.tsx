@@ -1,7 +1,5 @@
 "use client";
 
-// TODO: Protect this route on the server: only users with role ADMIN may open it (proxy.ts
-
 import { useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { z } from "zod";

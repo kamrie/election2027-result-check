@@ -1,4 +1,6 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
+import { getAuthenticatedUser } from "@/lib/auth";
 import "./globals.css";
 import "@fontsource-variable/montserrat";
 import { SiteFooter } from "@/components/SiteFooter";
@@ -18,7 +20,9 @@ export default function RootLayout({
     <html lang="en">
       <body className="antialiased">
         <div className="min-h-screen bg-[var(--color-page)] text-ink">
-          <SiteHeader />
+          <Suspense fallback={<SiteHeader />}>
+            <SessionHeader />
+          </Suspense>
 
           <div className="mx-auto max-w-6xl bg-white shadow-[0_8px_12px_-8px_rgba(0,0,0,0.3)] md:border-x md:border-line">
             {children}
@@ -29,4 +33,8 @@ export default function RootLayout({
       </body>
     </html>
   );
+}
+async function SessionHeader() {
+  const user = await getAuthenticatedUser().catch(() => null);
+  return <SiteHeader authenticated={Boolean(user)} />;
 }

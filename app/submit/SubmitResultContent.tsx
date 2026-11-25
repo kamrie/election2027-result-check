@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
-import { fakeLocations } from "@/lib/fake-locations";
+import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { maxPhotos, maxVoteCount } from "@/lib/submission-validation";
+import type { SubmissionUnit } from "@/lib/submissions.server";
+import { compressPhoto, sendSubmission } from "./photo-client";
 import type { Party } from "@/lib/parties";
 
 function CameraIcon() {
@@ -94,44 +96,46 @@ function WarningIcon() {
 	);
 }
 
-export default function SubmitResultContent({ parties }: { parties: Party[] }) {
+export default function SubmitResultContent({ parties, selectedUnit, unitRequested, alreadySubmitted, storageReady }: {
+	parties: Party[];
+	selectedUnit: SubmissionUnit | null;
+	unitRequested: boolean;
+	alreadySubmitted: boolean;
+	storageReady: boolean;
+}) {
+	const router = useRouter();
+	const previewUrls = useRef(new Set<string>());
 	const fileInputRef = useRef<HTMLInputElement>(null);
-	const [photos, setPhotos] = useState<string[]>([]);
+	const [photos, setPhotos] = useState<{ file: File; url: string }[]>([]);
+	const [preparing, setPreparing] = useState(false);
+	const [progress, setProgress] = useState<number | null>(null);
+	const [photoError, setPhotoError] = useState("");
+	const [submitError, setSubmitError] = useState("");
+	const [submitted, setSubmitted] = useState<{ message: string; unitCode: string } | null>(null);
+
+	useEffect(() => {
+		const urls = previewUrls.current;
+		return () => {
+			for (const url of urls) URL.revokeObjectURL(url);
+			urls.clear();
+		};
+	}, []);
+
+	useEffect(() => {
+		if (!submitted) return;
+		const timer = window.setTimeout(() => router.replace("/unit/" + encodeURIComponent(submitted.unitCode)), 1800);
+		return () => window.clearTimeout(timer);
+	}, [router, submitted]);
 	const [scores, setScores] = useState<Record<number, string>>({});
 	const [accredited, setAccredited] = useState("");
 	const [valid, setValid] = useState("");
 	const [rejected, setRejected] = useState("");
 	const [confirmed, setConfirmed] = useState(false);
 	const [exactAsWritten, setExactAsWritten] = useState(false);
-	const [submitted, setSubmitted] = useState(false);
-	const [, setSubmissionData] = useState<{ flagged?: boolean } | null>(null);
-
-	const searchParams = useSearchParams();
-	const unitCode = searchParams.get("unit")?.trim();
-	let selectedUnit = null;
-
-	for (const state of fakeLocations) {
-		for (const lga of state.lgas) {
-			for (const ward of lga.wards) {
-				const unit = ward.units.find((item) => item.code === unitCode);
-				if (unit) {
-					selectedUnit = { unit, ward: ward.name, lga: lga.name, state: state.name };
-					break;
-				}
-			}
-			if (selectedUnit) break;
-		}
-		if (selectedUnit) break;
-	}
-
 	const wholeNumberPattern = /^\d+$/;
-	const valuesAreWholeNumbers =
-		parties.every((party) =>
-			wholeNumberPattern.test(scores[party.id]) || !scores[party.id]
-		) &&
-		wholeNumberPattern.test(accredited) &&
-		wholeNumberPattern.test(valid) &&
-		wholeNumberPattern.test(rejected);
+	const isVoteCount = (value: string) => wholeNumberPattern.test(value) && Number(value) <= maxVoteCount;
+	const valuesAreWholeNumbers = parties.every((party) => isVoteCount(scores[party.id] ?? ""))
+		&& isVoteCount(accredited) && isVoteCount(valid) && isVoteCount(rejected);
 
 	const partyTotal = parties.reduce(
 		(total, party) => {
@@ -145,28 +149,55 @@ export default function SubmitResultContent({ parties }: { parties: Party[] }) {
 	const rejectedNumber = Number(rejected);
 	const validPlusRejected = validNumber + rejectedNumber;
 
-	const allScoresFilled =
-		parties.every((party) => (scores[party.id] ?? "").trim() !== "") &&
-		accredited.trim() !== "" &&
-		valid.trim() !== "" &&
-		rejected.trim() !== "";
-	const liveCheckVisible = allScoresFilled && valuesAreWholeNumbers;
+	const liveCheckVisible = valuesAreWholeNumbers;
 	const scoresMatch = liveCheckVisible && partyTotal === validNumber;
 	const accreditationPasses = liveCheckVisible && validPlusRejected <= accreditedNumber;
 	const rulesPass = scoresMatch && accreditationPasses;
-	const ruleExceptionChecked = !rulesPass && exactAsWritten;
-	const canSubmit =
-		photos.length > 0 &&
-		allScoresFilled &&
-		valuesAreWholeNumbers &&
-		confirmed &&
-		(rulesPass || ruleExceptionChecked);
+	const canSubmit = storageReady && !preparing && progress === null && photos.length > 0
+		&& valuesAreWholeNumbers && confirmed && (rulesPass || exactAsWritten);
 
-	const addPhotos = (files: FileList | null) => {
-		if (!files) return;
-		const names = Array.from(files).map((file) => URL.createObjectURL(file));
-		setPhotos((current) => [...current, ...names].slice(0, 6));
-	};
+	async function addPhotos(files: File[]) {
+		if (!files.length || preparing) return;
+		setPhotoError(files.length + photos.length > maxPhotos ? "You can add up to six photos." : "");
+		setPreparing(true);
+		for (const file of files.slice(0, maxPhotos - photos.length)) {
+			try {
+				const compressed = await compressPhoto(file);
+				if (!fileInputRef.current) return;
+				const url = URL.createObjectURL(compressed);
+				previewUrls.current.add(url);
+				setPhotos((current) => [...current, { file: compressed, url }]);
+			} catch {
+				setPhotoError("A photo could not be prepared. Choose a readable JPEG or PNG.");
+			}
+		}
+		setPreparing(false);
+	}
+
+	function removePhoto(url: string) {
+		URL.revokeObjectURL(url);
+		previewUrls.current.delete(url);
+		setPhotos((current) => current.filter((photo) => photo.url !== url));
+	}
+
+	async function submit() {
+		if (!canSubmit || !selectedUnit) return;
+		const form = new FormData();
+		form.set("result", JSON.stringify({
+			unitCode: selectedUnit.code, accredited: accreditedNumber, valid: validNumber, rejected: rejectedNumber,
+			confirmed, sheetDoesNotAddUp: !rulesPass && exactAsWritten,
+			scores: parties.map((party) => ({ partyId: party.id, score: Number(scores[party.id]) })),
+		}));
+		for (const photo of photos) form.append("photos", photo.file);
+		setSubmitError("");
+		setProgress(0);
+		try {
+			setSubmitted(await sendSubmission(form, setProgress));
+		} catch (error) {
+			setSubmitError(error instanceof Error ? error.message : "Could not submit the result. Try again.");
+			setProgress(null);
+		}
+	}
 
 	if (submitted) {
 		return (
@@ -199,12 +230,11 @@ export default function SubmitResultContent({ parties }: { parties: Party[] }) {
 						Result submitted
 					</h1>
 					<p className="mx-auto mt-3 max-w-[580px] text-base leading-7 text-muted">
-						Thank you. Your submission shows as Unverified until another person
-						submits the same scores for this unit.
+						{submitted.message} Opening the polling-unit page...
 					</p>
 					<div className="mx-auto mt-7 grid max-w-[520px] gap-3 md:grid-cols-2">
 						<Link
-							href="/find-unit"
+							href={"/unit/" + encodeURIComponent(submitted.unitCode)}
 							className="flex h-[52px] items-center justify-center bg-brand px-5 text-base font-bold text-white shadow-[0_5px_0_0_#005C37]"
 						>
 							View unit page
@@ -221,18 +251,18 @@ export default function SubmitResultContent({ parties }: { parties: Party[] }) {
 		);
 	}
 
-	if (!selectedUnit) {
+	if (!selectedUnit || alreadySubmitted) {
 		return (
 			<main className="mx-auto min-h-[620px] px-4 pb-12 pt-10 md:px-8 lg:flex lg:max-w-[760px] lg:flex-col lg:justify-center lg:px-10">
 				<section className="text-center">
 					<h1 className="text-[2.2rem] font-bold leading-[1.1] text-brand md:text-[2.8rem]">
-						No polling unit selected
+						{alreadySubmitted ? "You already submitted a result for this polling unit" : unitRequested ? "Polling unit not found" : "Select your polling unit"}
 					</h1>
 					<Link
 						href="/find-unit"
 						className="mt-6 flex h-[52px] w-full items-center justify-center bg-brand px-5 text-base font-bold text-white shadow-[0_5px_0_0_#005C37] md:mx-auto md:w-[260px]"
 					>
-						Find your polling unit
+						{alreadySubmitted ? "Choose another polling unit" : "Find your polling unit"}
 					</Link>
 				</section>
 			</main>
@@ -256,29 +286,29 @@ export default function SubmitResultContent({ parties }: { parties: Party[] }) {
 						<div>
 							<span className="text-muted">Unit name</span>
 							<p className="mt-0.5 font-bold text-ink">
-								{selectedUnit?.unit.name}
+								{selectedUnit.name}
 							</p>
 						</div>
 						<div>
 							<span className="text-muted">Code</span>
-							<p className="mt-0.5 font-bold text-ink">{selectedUnit.unit.code}</p>
+							<p className="mt-0.5 font-bold text-ink">{selectedUnit.code}</p>
 						</div>
 						<div>
 							<span className="text-muted">Ward</span>
 							<p className="mt-0.5 font-bold text-ink">
-								{selectedUnit?.ward}
+								{selectedUnit.ward}
 							</p>
 						</div>
 						<div>
 							<span className="text-muted">LGA</span>
 							<p className="mt-0.5 font-bold text-ink">
-								{selectedUnit?.lga}
+								{selectedUnit.lga}
 							</p>
 						</div>
 						<div>
 							<span className="text-muted">State</span>
 							<p className="mt-0.5 font-bold text-ink">
-								{selectedUnit?.state}
+								{selectedUnit.state}
 							</p>
 						</div>
 					</div>
@@ -301,11 +331,16 @@ export default function SubmitResultContent({ parties }: { parties: Party[] }) {
 						accept="image/jpeg,image/png"
 						multiple
 						className="hidden"
-						onChange={(event) => addPhotos(event.target.files)}
+						onChange={(event) => {
+						const files = Array.from(event.target.files ?? []);
+						event.target.value = "";
+						void addPhotos(files);
+					}}
 					/>
 					<button
 						type="button"
 						onClick={() => fileInputRef.current?.click()}
+						disabled={preparing || progress !== null || photos.length >= maxPhotos}
 						className="mt-3 flex h-[132px] w-full flex-col items-center justify-center border-2 border-dashed border-brand bg-[#F7FAF8] px-4 text-brand"
 					>
 						<CameraIcon />
@@ -313,32 +348,31 @@ export default function SubmitResultContent({ parties }: { parties: Party[] }) {
 							Tap to take a photo or choose a file
 						</span>
 						<span className="mt-1 text-xs text-muted">
-							Make sure all the numbers and signatures are readable. JPEG or PNG.
+							Form EC8A. Up to six JPEG or PNG photos. Make sure scores and signatures are readable.
 						</span>
 					</button>
 
+					{preparing && <p role="status" className="mt-2 text-sm text-muted">Preparing photos...</p>}
+					{photoError && <p role="alert" className="mt-2 text-sm text-[#B42318]">{photoError}</p>}
 					{photos.length > 0 && (
 						<div className="mt-3">
 							<div className="grid grid-cols-2 gap-3 md:max-w-[420px]">
-								{photos.slice(0, 2).map((photo, index) => (
+								{photos.map((photo, index) => (
 									<div
-										key={photo}
+										key={photo.url}
 										className="relative h-[104px] overflow-hidden border border-line bg-[#EEF1EF]"
 									>
 										{/* eslint-disable-next-line @next/next/no-img-element */}
 										<img
-											src={photo}
-											alt={`Uploaded result sheet ${index + 1}`}
+											src={photo.url}
+											alt={`Result sheet preview ${index + 1}`}
 											className="h-full w-full object-cover"
 										/>
 										<button
 											type="button"
 											aria-label={`Remove photo ${index + 1}`}
-											onClick={() =>
-												setPhotos((current) =>
-													current.filter((_, photoIndex) => photoIndex !== index)
-												)
-											}
+											onClick={() => removePhoto(photo.url)}
+										disabled={preparing || progress !== null}
 											className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center bg-white text-ink shadow-[0_3px_8px_rgba(0,0,0,0.18)]"
 										>
 											<svg
@@ -391,11 +425,14 @@ export default function SubmitResultContent({ parties }: { parties: Party[] }) {
 										type="number"
 										inputMode="numeric"
 										min="0"
+										max={maxVoteCount}
+										disabled={progress !== null}
 										value={score}
 										onChange={(event) => {
 											const next = event.target.value;
 											if (next === "" || /^\d+$/.test(next)) {
 												setScores((current) => ({ ...current, [party.id]: next }));
+												setExactAsWritten(false);
 											}
 										}}
 										className={`h-[52px] w-full border bg-white px-3 text-right text-base font-bold text-ink outline-none ${
@@ -439,10 +476,15 @@ export default function SubmitResultContent({ parties }: { parties: Party[] }) {
 									type="number"
 									inputMode="numeric"
 									min="0"
+										max={maxVoteCount}
+										disabled={progress !== null}
 									value={field.value}
 									onChange={(event) => {
 										const next = event.target.value;
-										if (next === "" || /^\d+$/.test(next)) field.setter(next);
+										if (next === "" || /^\d+$/.test(next)) {
+											field.setter(next);
+											setExactAsWritten(false);
+										}
 									}}
 									className={`h-[52px] w-full border bg-white px-3 text-base font-bold text-ink outline-none ${
 										liveCheckVisible &&
@@ -480,12 +522,13 @@ export default function SubmitResultContent({ parties }: { parties: Party[] }) {
 						<label className="mt-5 flex cursor-pointer items-start gap-3">
 							<input
 								type="checkbox"
+								disabled={progress !== null}
 								checked={exactAsWritten}
 								onChange={(event) => setExactAsWritten(event.target.checked)}
 								className="mt-0.5 h-5 w-5 shrink-0 accent-[#008751]"
 							/>
 							<span className="text-sm font-medium leading-6 text-ink md:text-base">
-								These numbers are exactly as written on the sheet, even though they do not add up.
+								Sheet does not add up. I confirm these numbers are exactly as written.
 							</span>
 						</label>
 					)}
@@ -493,6 +536,7 @@ export default function SubmitResultContent({ parties }: { parties: Party[] }) {
 					<label className="mt-5 flex cursor-pointer items-start gap-3">
 						<input
 							type="checkbox"
+							disabled={progress !== null}
 							checked={confirmed}
 							onChange={(event) => setConfirmed(event.target.checked)}
 							className="mt-0.5 h-5 w-5 shrink-0 accent-[#008751]"
@@ -502,14 +546,18 @@ export default function SubmitResultContent({ parties }: { parties: Party[] }) {
 						</span>
 					</label>
 
+					{!storageReady && <p role="alert" className="mt-4 text-sm text-[#B42318]">Photo storage is not configured. Please contact the site administrator.</p>}
+					{submitError && <p role="alert" className="mt-4 text-sm text-[#B42318]">{submitError}</p>}
+					{progress !== null && (
+						<div role="status" className="mt-4 text-sm text-muted">
+							{progress < 100 ? "Uploading photos... " + progress + "%" : "Upload received. Saving your result..."}
+							<progress aria-label="Photo upload progress" value={progress} max={100} className="mt-2 block w-full accent-[#008751]" />
+						</div>
+					)}
 					<button
 						type="button"
 						disabled={!canSubmit}
-						onClick={() => {
-							// TODO: Save this submission data to the database, including the flagged field.
-							setSubmissionData({ flagged: exactAsWritten });
-							setSubmitted(true);
-						}}
+						onClick={() => void submit()}
 						className="mt-5 h-[52px] w-full bg-brand text-base font-bold text-white shadow-[0_5px_0_0_#005C37] disabled:bg-[#A7AFAB] disabled:shadow-[0_5px_0_0_#7E8782] disabled:cursor-not-allowed"
 					>
 						Submit result

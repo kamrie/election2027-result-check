@@ -1,9 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
-import { fakeLocations } from "@/lib/fake-locations";
-import { StatusTag } from "@/components/StatusTag";
+import { useEffect, useState } from "react";
 
 type Tab = "location" | "code";
 type LocationValues = {
@@ -12,6 +10,106 @@ type LocationValues = {
 	ward: string;
 	unit: string;
 };
+
+type LocationOption = { id: number; name: string };
+type PollingUnit = LocationOption & { code: string };
+
+type LookupResult<T> =
+	| { status: "idle" | "loading" | "error" }
+	| { status: "ready"; items: T[] };
+
+function useLookup<T>(url: string | null, delay = 0) {
+	const [attempt, setAttempt] = useState(0);
+	const [response, setResponse] = useState<{
+		url: string;
+		attempt: number;
+		result: LookupResult<T>;
+	}>();
+	const result: LookupResult<T> = !url
+		? { status: "idle" }
+		: response?.url === url && response.attempt === attempt
+			? response.result
+			: { status: "loading" };
+
+	useEffect(() => {
+		if (!url) return;
+		const controller = new AbortController();
+
+		async function load(endpoint: string) {
+			try {
+				const response = await fetch(endpoint, { signal: controller.signal });
+				if (!response.ok) throw new Error("Lookup failed");
+				const items: T[] = await response.json();
+				if (!controller.signal.aborted) {
+					setResponse({ url: endpoint, attempt, result: { status: "ready", items } });
+				}
+			} catch {
+				if (!controller.signal.aborted) {
+					setResponse({ url: endpoint, attempt, result: { status: "error" } });
+				}
+			}
+		}
+
+		const timer = window.setTimeout(() => void load(url), delay);
+		return () => {
+			window.clearTimeout(timer);
+			controller.abort();
+		};
+	}, [url, delay, attempt]);
+
+	return { result, retry: () => setAttempt((current) => current + 1) };
+}
+
+function LocationSelect<T extends LocationOption>({ id, label, placeholder, lookup, value, onChange, formatName }: {
+	id: string;
+	label: string;
+	placeholder: string;
+	lookup: ReturnType<typeof useLookup<T>>;
+	value: string;
+	onChange: (value: string) => void;
+	formatName?: (item: T) => string;
+}) {
+	const { result, retry } = lookup;
+	const items = result.status === "ready" ? result.items : [];
+	const loading = result.status === "loading";
+	const empty = result.status === "ready" && items.length === 0;
+
+	return (
+		<div>
+			<label htmlFor={id} className="mb-2 block text-sm font-bold text-ink">{label}</label>
+			<div className="relative">
+				<select
+					id={id}
+					value={value}
+					disabled={items.length === 0}
+					aria-busy={loading}
+					onChange={(event) => onChange(event.target.value)}
+					className="h-[52px] w-full appearance-none border border-line bg-white px-3 pr-10 text-base text-ink outline-none disabled:bg-[#F2F4F3] disabled:text-[#9BA39F] focus:border-brand"
+				>
+					<option value="">{placeholder}</option>
+					{items.map((item) => (
+						<option key={item.id} value={item.id}>{formatName ? formatName(item) : item.name}</option>
+					))}
+				</select>
+				<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" className="pointer-events-none absolute right-3 top-1/2 h-5 w-5 -translate-y-1/2 text-brand">
+					<path d="M6 9L12 15L18 9" stroke="currentColor" strokeWidth="2" strokeLinecap="square" strokeLinejoin="round" />
+				</svg>
+			</div>
+			{loading && <p role="status" className="mt-2 text-sm text-muted">Loading {label.toLowerCase()} options?</p>}
+			{empty && <p role="status" className="mt-2 text-sm text-muted">No options available.</p>}
+			{result.status === "error" && (
+				<div className="mt-2 flex flex-wrap gap-x-2 text-sm">
+					<p role="alert" className="text-[#B42318]">Could not load {label.toLowerCase()} options.</p>
+					<button type="button" onClick={retry} className="font-bold text-brand underline">Try again</button>
+				</div>
+			)}
+		</div>
+	);
+}
+
+function selectedOption<T extends LocationOption>(result: LookupResult<T>, id: string) {
+	return result.status === "ready" ? result.items.find((item) => String(item.id) === id) : undefined;
+}
 
 function ShieldIcon() {
 	return (
@@ -48,21 +146,25 @@ export default function FindUnitPage() {
 		unit: "",
 	});
 	const [showResult, setShowResult] = useState(false);
-	const [code, setCode] = useState("");
-	const [codeSearched, setCodeSearched] = useState(false);
+	const [searchText, setSearchText] = useState("");
+	const term = searchText.trim();
 
-	const selectedState = fakeLocations.find((state) => state.name === values.state);
-	const selectedLGA = selectedState?.lgas.find((lga) => lga.name === values.lga);
-	const selectedWard = selectedLGA?.wards.find((ward) => ward.name === values.ward);
-	const selectedUnit = selectedWard?.units.find((unit) => unit.name === values.unit);
-	const allLocationsChosen = Boolean(values.state && values.lga && values.ward && values.unit);
-	const codeFound = fakeLocations.some((state) =>
-		state.lgas.some((lga) =>
-			lga.wards.some((ward) =>
-				ward.units.some((unit) => unit.code === code.trim())
-			)
-		)
+	const states = useLookup<LocationOption>("/api/locations");
+	const lgas = useLookup<LocationOption>(values.state ? "/api/locations?stateId=" + values.state : null);
+	const wards = useLookup<LocationOption>(values.lga ? "/api/locations?lgaId=" + values.lga : null);
+	const units = useLookup<PollingUnit>(values.ward ? "/api/locations?wardId=" + values.ward : null);
+	const search = useLookup<PollingUnit>(
+		activeTab === "code" && term.length >= 2
+			? "/api/polling-units?" + new URLSearchParams({ q: term })
+			: null,
+		300,
 	);
+
+	const selectedState = selectedOption(states.result, values.state);
+	const selectedLGA = selectedOption(lgas.result, values.lga);
+	const selectedWard = selectedOption(wards.result, values.ward);
+	const selectedUnit = selectedOption(units.result, values.unit);
+	const allLocationsChosen = Boolean(selectedState && selectedLGA && selectedWard && selectedUnit);
 
 	const handleLocationChange = (key: keyof LocationValues, value: string) => {
 		setShowResult(false);
@@ -81,7 +183,7 @@ export default function FindUnitPage() {
 					Find your polling unit
 				</h1>
 				<p className="mt-3 max-w-[38rem] text-base leading-7 text-muted">
-					Choose your state, LGA and ward, or search with your polling unit code.
+					Choose your state, LGA and ward, or search by polling unit code or name.
 				</p>
 
 				<div className="mt-6 border border-line bg-white shadow-[0_8px_12px_-8px_rgba(0,0,0,0.3)]">
@@ -106,175 +208,17 @@ export default function FindUnitPage() {
 									: "border border-brand bg-white text-brand"
 							}`}
 						>
-							Search by code
+							Search by code or name
 						</button>
 					</div>
 
 					{activeTab === "location" ? (
 						<div className="p-4 md:p-6">
 							<div className="grid gap-4 md:grid-cols-2">
-								<div>
-									<label
-										htmlFor="state"
-										className="mb-2 block text-sm font-bold text-ink"
-									>
-										State
-									</label>
-									<div className="relative">
-										<select
-											id="state"
-											value={values.state}
-											onChange={(event) =>
-												handleLocationChange("state", event.target.value)
-											}
-											className="h-[52px] w-full appearance-none border border-line bg-white px-3 pr-10 text-base text-ink outline-none focus:border-brand"
-										>
-											<option value="">Select a state</option>
-											{fakeLocations.map((state) => (
-												<option key={state.name} value={state.name}>
-													{state.name}
-												</option>
-											))}
-										</select>
-										<svg
-											aria-hidden="true"
-											viewBox="0 0 24 24"
-											className="pointer-events-none absolute right-3 top-1/2 h-5 w-5 -translate-y-1/2 text-brand"
-											fill="none"
-										>
-											<path
-												d="M6 9L12 15L18 9"
-												stroke="currentColor"
-												strokeWidth="2"
-												strokeLinecap="square"
-												strokeLinejoin="round"
-											/>
-										</svg>
-									</div>
-								</div>
-
-								<div>
-									<label
-										htmlFor="lga"
-										className="mb-2 block text-sm font-bold text-ink"
-									>
-										LGA
-									</label>
-									<div className="relative">
-										<select
-											id="lga"
-											value={values.lga}
-											disabled={!values.state}
-											onChange={(event) =>
-												handleLocationChange("lga", event.target.value)
-											}
-											className="h-[52px] w-full appearance-none border border-line bg-white px-3 pr-10 text-base text-ink outline-none disabled:bg-[#F2F4F3] disabled:text-[#9BA39F] focus:border-brand"
-										>
-											<option value="">Select an LGA</option>
-											{selectedState?.lgas.map((lga) => (
-												<option key={lga.name} value={lga.name}>
-													{lga.name}
-												</option>
-											))}
-										</select>
-										<svg
-											aria-hidden="true"
-											viewBox="0 0 24 24"
-											className="pointer-events-none absolute right-3 top-1/2 h-5 w-5 -translate-y-1/2 text-brand"
-											fill="none"
-										>
-											<path
-												d="M6 9L12 15L18 9"
-												stroke="currentColor"
-												strokeWidth="2"
-												strokeLinecap="square"
-												strokeLinejoin="round"
-											/>
-										</svg>
-									</div>
-								</div>
-
-								<div>
-									<label
-										htmlFor="ward"
-										className="mb-2 block text-sm font-bold text-ink"
-									>
-										Ward
-									</label>
-									<div className="relative">
-										<select
-											id="ward"
-											value={values.ward}
-											disabled={!values.lga}
-											onChange={(event) =>
-												handleLocationChange("ward", event.target.value)
-											}
-											className="h-[52px] w-full appearance-none border border-line bg-white px-3 pr-10 text-base text-ink outline-none disabled:bg-[#F2F4F3] disabled:text-[#9BA39F] focus:border-brand"
-										>
-											<option value="">Select a ward</option>
-											{selectedLGA?.wards.map((ward) => (
-												<option key={ward.name} value={ward.name}>
-													{ward.name}
-												</option>
-											))}
-										</select>
-										<svg
-											aria-hidden="true"
-											viewBox="0 0 24 24"
-											className="pointer-events-none absolute right-3 top-1/2 h-5 w-5 -translate-y-1/2 text-brand"
-											fill="none"
-										>
-											<path
-												d="M6 9L12 15L18 9"
-												stroke="currentColor"
-												strokeWidth="2"
-												strokeLinecap="square"
-												strokeLinejoin="round"
-											/>
-										</svg>
-									</div>
-								</div>
-
-								<div>
-									<label
-										htmlFor="unit"
-										className="mb-2 block text-sm font-bold text-ink"
-									>
-										Polling unit
-									</label>
-									<div className="relative">
-										<select
-											id="unit"
-											value={values.unit}
-											disabled={!values.ward}
-											onChange={(event) =>
-												handleLocationChange("unit", event.target.value)
-											}
-											className="h-[52px] w-full appearance-none border border-line bg-white px-3 pr-10 text-base text-ink outline-none disabled:bg-[#F2F4F3] disabled:text-[#9BA39F] focus:border-brand"
-										>
-											<option value="">Select a polling unit</option>
-											{selectedWard?.units.map((unit) => (
-												<option key={unit.code} value={unit.name}>
-													{unit.name}
-												</option>
-											))}
-										</select>
-										<svg
-											aria-hidden="true"
-											viewBox="0 0 24 24"
-											className="pointer-events-none absolute right-3 top-1/2 h-5 w-5 -translate-y-1/2 text-brand"
-											fill="none"
-										>
-											<path
-												d="M6 9L12 15L18 9"
-												stroke="currentColor"
-												strokeWidth="2"
-												strokeLinecap="square"
-												strokeLinejoin="round"
-											/>
-										</svg>
-									</div>
-								</div>
+								<LocationSelect id="state" label="State" placeholder="Select a state" lookup={states} value={values.state} onChange={(value) => handleLocationChange("state", value)} />
+								<LocationSelect id="lga" label="LGA" placeholder="Select an LGA" lookup={lgas} value={values.lga} onChange={(value) => handleLocationChange("lga", value)} />
+								<LocationSelect id="ward" label="Ward" placeholder="Select a ward" lookup={wards} value={values.ward} onChange={(value) => handleLocationChange("ward", value)} />
+								<LocationSelect id="unit" label="Polling unit" placeholder="Select a polling unit" lookup={units} value={values.unit} onChange={(value) => handleLocationChange("unit", value)} formatName={(unit) => unit.name + " (" + unit.code + ")"} />
 							</div>
 
 							<button
@@ -288,49 +232,48 @@ export default function FindUnitPage() {
 						</div>
 					) : (
 						<div className="p-4 md:p-6">
-							<form
-								onSubmit={(event) => {
-									event.preventDefault();
-									setCodeSearched(true);
-								}}
-							>
-								<label
-									htmlFor="polling-code"
-									className="mb-2 block text-sm font-bold text-ink"
-								>
-									Polling unit code
+							<form onSubmit={(event) => {
+								event.preventDefault();
+								if (term.length >= 2 && search.result.status !== "loading") search.retry();
+							}}>
+								<label htmlFor="polling-search" className="mb-2 block text-sm font-bold text-ink">
+									Polling unit code or name
 								</label>
 								<input
-									id="polling-code"
-									type="text"
-									value={code}
-									onChange={(event) => {
-										setCode(event.target.value);
-										setCodeSearched(false);
-									}}
-									placeholder="For example 24-01-03-007"
+									id="polling-search"
+									type="search"
+									value={searchText}
+									onChange={(event) => setSearchText(event.target.value)}
+									maxLength={100}
+									placeholder="For example 01-01-01-001 or Railway Quarters"
 									className="h-[52px] w-full border border-line bg-white px-3 text-base text-ink outline-none focus:border-brand"
 								/>
-								<p className="mt-2 text-xs font-medium text-muted">
-									You can find this code on the result sheet.
-								</p>
-
-								{codeSearched && !codeFound && (
-									<p
-										role="status"
-										className="mt-4 border border-line bg-[#F7F8F7] p-4 text-sm font-medium text-[#B42318]"
-									>
-										No polling unit found. Check the code and try again.
-									</p>
-								)}
-
+								<p className="mt-2 text-xs font-medium text-muted">Enter at least two characters to search.</p>
 								<button
 									type="submit"
-									className="mt-5 flex h-[52px] w-full items-center justify-center bg-brand px-6 text-base font-bold text-white shadow-[0_5px_0_0_#005C37] md:w-[220px]"
+									disabled={term.length < 2 || search.result.status === "loading"}
+									className="mt-5 flex h-[52px] w-full items-center justify-center bg-brand px-6 text-base font-bold text-white shadow-[0_5px_0_0_#005C37] disabled:cursor-not-allowed disabled:bg-[#D6DAD7] disabled:text-[#8B948F] disabled:shadow-none md:w-[220px]"
 								>
-									Search
+									{search.result.status === "error" ? "Try again" : "Search"}
 								</button>
 							</form>
+							{search.result.status === "loading" && <p role="status" className="mt-4 text-sm text-muted">Searching polling units?</p>}
+							{search.result.status === "error" && <p role="alert" className="mt-4 text-sm text-[#B42318]">Could not search polling units. Try again.</p>}
+							{search.result.status === "ready" && (
+								search.result.items.length === 0 ? (
+									<p role="status" className="mt-4 border border-line bg-[#F7F8F7] p-4 text-sm text-muted">No polling units found.</p>
+								) : (
+									<ul aria-label="Polling unit search results" className="mt-5 divide-y divide-line border border-line">
+										{search.result.items.map((unit) => (
+											<li key={unit.id}>
+												<Link href={"/unit/" + encodeURIComponent(unit.code)} className="block px-4 py-3 text-sm font-bold text-brand hover:underline">
+													{unit.name} ({unit.code})
+												</Link>
+											</li>
+										))}
+									</ul>
+								)
+							)}
 						</div>
 					)}
 				</div>
@@ -338,7 +281,7 @@ export default function FindUnitPage() {
 				{showResult && selectedUnit && activeTab === "location" && (
 					<section className="mt-6 border border-line bg-white p-4 shadow-[0_8px_12px_-8px_rgba(0,0,0,0.3)] md:p-6">
 						<p className="text-sm font-bold text-brand-dark">Selected polling unit</p>
-						<h2 className="mt-2 text-xl font-bold text-ink">{selectedUnit.name}</h2>
+						<h2 className="mt-2 text-xl font-bold text-ink">{selectedUnit.name} ({selectedUnit.code})</h2>
 
 						<dl className="mt-4 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
 							<div>
@@ -347,15 +290,15 @@ export default function FindUnitPage() {
 							</div>
 							<div>
 								<dt className="font-medium text-muted">Ward</dt>
-								<dd className="mt-1 font-bold text-ink">{values.ward}</dd>
+								<dd className="mt-1 font-bold text-ink">{selectedWard?.name}</dd>
 							</div>
 							<div>
 								<dt className="font-medium text-muted">LGA</dt>
-								<dd className="mt-1 font-bold text-ink">{values.lga}</dd>
+								<dd className="mt-1 font-bold text-ink">{selectedLGA?.name}</dd>
 							</div>
 							<div>
 								<dt className="font-medium text-muted">State</dt>
-								<dd className="mt-1 font-bold text-ink">{values.state}</dd>
+								<dd className="mt-1 font-bold text-ink">{selectedState?.name}</dd>
 							</div>
 						</dl>
 

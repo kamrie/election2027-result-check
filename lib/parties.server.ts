@@ -10,7 +10,7 @@ export function isPartyFallback(parties: Party[]): boolean {
   return parties === fallbackParties;
 }
 
-export async function getActiveParties(): Promise<Party[]> {
+export async function getActiveParties(allowFallback = true): Promise<Party[]> {
   await connection();
 
   try {
@@ -22,7 +22,7 @@ export async function getActiveParties(): Promise<Party[]> {
     );
     return parties.map(({ id, name, abbreviation }) => ({ id, name, abbreviation }));
   } catch (error) {
-    if (process.env.NODE_ENV === "development") {
+    if (allowFallback && process.env.NODE_ENV === "development") {
       console.warn("Could not query active parties. Using the development fallback.", error);
       return fallbackParties;
     }

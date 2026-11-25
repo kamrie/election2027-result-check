@@ -6,14 +6,14 @@ import { usePathname } from "next/navigation";
 import { Logo } from "@/components/Logo";
 import { Stripe } from "@/components/Stripe";
 
-const navItems = [
+const publicLinks = [
 	{ label: "Home", href: "\/" },
 	{ label: "Find your polling unit", href: "\/find-unit" },
 	{ label: "Dashboard", href: "\/dashboard" },
-	{ label: "Log in", href: "\/login" },
 ];
 
-export function SiteHeader() {
+export function SiteHeader({ authenticated = false }: { authenticated?: boolean }) {
+	const navItems = [...publicLinks, { label: authenticated ? "Account" : "Log in", href: "/login?tab=login" }];
 	const [isMenuOpen, setIsMenuOpen] = useState(false);
 	const pathname = usePathname();
 
@@ -42,7 +42,7 @@ export function SiteHeader() {
 								key={item.label}
 								href={item.href}
 								className={`transition-opacity hover:opacity-75 ${
-									pathname === item.href
+									pathname === item.href.split("?")[0]
 										? "border-b-2 border-brand pb-1 font-bold text-brand"
 										: "text-ink"
 								}`}

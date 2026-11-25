@@ -2,40 +2,8 @@
 
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { z } from "zod";
-
-const emailPhoneSchema = z
-  .string()
-  .trim()
-  .refine((value) => {
-    if (!value) {
-      return false;
-    }
-
-    const trimmed = value.trim();
-
-    if (trimmed.includes("@")) {
-      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
-    }
-
-    const digitsOnly = trimmed.replace(/\+/g, "");
-    return /^\d{10,14}$/.test(digitsOnly);
-  }, "Enter a valid email or phone number.");
-
-const signUpSchema = z.object({
-  name: z
-    .string()
-    .trim()
-    .min(2, "Enter your name or nickname.")
-    .max(100, "Name must be 100 characters or fewer."),
-  emailOrPhone: emailPhoneSchema,
-  password: z.string().min(8, "Password must be at least 8 characters."),
-});
-
-const loginSchema = z.object({
-  emailOrPhone: emailPhoneSchema,
-  password: z.string().min(1, "Password is required."),
-});
+import { afterLoginDestination } from "@/lib/auth-destination";
+import { loginSchema, signupSchema, type AuthUser } from "@/lib/auth-validation";
 
 type Tab = "signup" | "login";
 
@@ -56,7 +24,10 @@ export default function LoginPage() {
 function LoginPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [activeTab, setActiveTab] = useState<Tab>("signup");
+  const activeTab: Tab = searchParams.get("tab") === "login" ? "login" : "signup";
+  const [user, setUser] = useState<AuthUser | null>();
+  const [pending, setPending] = useState(false);
+  const [feedback, setFeedback] = useState<{ message: string; error: boolean } | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const [formValues, setFormValues] = useState({
@@ -67,24 +38,28 @@ function LoginPageContent() {
   const [errors, setErrors] = useState<FormErrors>({});
 
   useEffect(() => {
-    const tabFromQuery = searchParams.get("tab") === "login" ? "login" : "signup";
-    setActiveTab(tabFromQuery);
-  }, [searchParams]);
-
-  useEffect(() => {
-    if (Object.keys(errors).length === 0) {
-      return;
+    const controller = new AbortController();
+    async function loadSession() {
+      try {
+        const response = await fetch("/api/auth/session", { signal: controller.signal, cache: "no-store" });
+        if (!response.ok) {
+          if (!controller.signal.aborted) setUser(null);
+          return;
+        }
+        const data: { user: AuthUser } = await response.json();
+        if (!controller.signal.aborted) setUser(data.user);
+      } catch {
+        if (!controller.signal.aborted) setUser(null);
+      }
     }
-
-    const timeoutId = window.setTimeout(() => {
-      setErrors({});
-    }, 5000);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [errors]);
+    void loadSession();
+    return () => controller.abort();
+  }, []);
 
   const switchTab = (nextTab: Tab) => {
-    setActiveTab(nextTab);
+    setFeedback(null);
+    setShowPassword(false);
+    setFormValues((current) => ({ ...current, password: "" }));
     setErrors({});
     setSubmitAttempted(false);
     const params = new URLSearchParams(searchParams.toString());
@@ -97,7 +72,7 @@ function LoginPageContent() {
   };
 
   const buildErrors = (values: typeof formValues) => {
-    const payload = activeTab === "signup" ? signUpSchema.safeParse(values) : loginSchema.safeParse(values);
+    const payload = activeTab === "signup" ? signupSchema.safeParse(values) : loginSchema.safeParse(values);
 
     if (payload.success) {
       return {};
@@ -121,6 +96,7 @@ function LoginPageContent() {
     };
 
     setFormValues(nextValues);
+    setFeedback(null);
 
     setErrors((currentErrors) => {
       if (!currentErrors[field]) {
@@ -133,9 +109,11 @@ function LoginPageContent() {
     });
   };
 
-  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (pending) return;
     setSubmitAttempted(true);
+    setFeedback(null);
 
     const nextErrors = buildErrors(formValues);
     setErrors(nextErrors);
@@ -144,9 +122,67 @@ function LoginPageContent() {
       return;
     }
 
-    console.log("form valid");
-    // TODO: send API request here.
+    setPending(true);
+    try {
+      const response = await fetch("/api/auth/" + activeTab, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(formValues),
+      });
+      if (!response.ok) {
+        const data: { error: string } = await response.json();
+        setFeedback({ message: data.error, error: true });
+      } else if (activeTab === "signup") {
+        switchTab("login");
+        setFeedback({ message: "Account created. Log in to continue.", error: false });
+      } else {
+        router.replace(afterLoginDestination(searchParams.get("next")));
+        router.refresh();
+        return;
+      }
+    } catch {
+      setFeedback({ message: "Could not reach the server. Try again.", error: true });
+    }
+    setPending(false);
   };
+
+  const logout = async () => {
+    setPending(true);
+    setFeedback(null);
+    try {
+      const response = await fetch("/api/auth/logout", { method: "POST" });
+      if (!response.ok) throw new Error("Logout failed.");
+      setUser(null);
+      setPending(false);
+      router.replace("/login?tab=login");
+      router.refresh();
+    } catch {
+      setFeedback({ message: "Could not log out. Try again.", error: true });
+      setPending(false);
+    }
+  };
+
+  if (user === undefined) {
+    return <p role="status" className="mx-auto max-w-md px-4 py-10 text-muted">Checking your session?</p>;
+  }
+
+  if (user) {
+    return (
+      <main className="px-4 pb-10 pt-8 md:px-8 lg:px-10">
+        <div className="mx-auto max-w-md">
+          <h1 className="text-[2.2rem] font-bold leading-[1.1] text-brand md:text-[2.8rem]">Your account</h1>
+          <div className="mt-6 border border-line bg-white p-4 shadow-[0_8px_12px_-8px_rgba(0,0,0,0.3)] md:p-6">
+            <p className="text-ink">Signed in as <strong>{user.name}</strong>.</p>
+            {feedback && <p role="alert" className="mt-3 text-sm text-[#B42318]">{feedback.message}</p>}
+            <button type="button" onClick={logout} disabled={pending}
+              className="mt-5 flex h-[52px] w-full items-center justify-center bg-brand font-bold text-white shadow-[0_5px_0_0_#005C37] disabled:opacity-60">
+              {pending ? "Logging out?" : "Log out"}
+            </button>
+          </div>
+        </div>
+      </main>
+    );
+  }
 
   const currentErrors = {
     name: submitAttempted ? errors.name : undefined,
@@ -170,6 +206,7 @@ function LoginPageContent() {
           <div className="grid grid-cols-2">
             <button
               type="button"
+              disabled={pending}
               onClick={() => switchTab("signup")}
               className={[
                 "flex h-[52px] items-center justify-center text-base font-bold",
@@ -181,6 +218,7 @@ function LoginPageContent() {
 
             <button
               type="button"
+              disabled={pending}
               onClick={() => switchTab("login")}
               className={[
                 "flex h-[52px] items-center justify-center text-base font-bold",
@@ -192,7 +230,7 @@ function LoginPageContent() {
           </div>
 
           <div className="p-4 md:p-6">
-            <form onSubmit={handleSubmit} noValidate>
+            <form onSubmit={handleSubmit} noValidate aria-busy={pending}>
               {activeTab === "signup" && (
                 <div className="mb-4">
                   <label htmlFor="name" className="mb-2 block text-sm font-bold text-ink">
@@ -200,6 +238,8 @@ function LoginPageContent() {
                   </label>
                   <input
                     id="name"
+                    autoComplete="nickname"
+                    maxLength={100}
                     type="text"
                     value={formValues.name}
                     onChange={(event) => handleChange("name", event.target.value)}
@@ -220,6 +260,8 @@ function LoginPageContent() {
                 </label>
                 <input
                   id="emailOrPhone"
+                  autoComplete="username"
+                  maxLength={191}
                   type="text"
                   value={formValues.emailOrPhone}
                   onChange={(event) => handleChange("emailOrPhone", event.target.value)}
@@ -252,6 +294,7 @@ function LoginPageContent() {
 
                 <input
                   id="password"
+                  autoComplete={activeTab === "signup" ? "new-password" : "current-password"}
                   type={showPassword ? "text" : "password"}
                   value={formValues.password}
                   onChange={(event) => handleChange("password", event.target.value)}
@@ -272,11 +315,19 @@ function LoginPageContent() {
                 )}
               </div>
 
+              {feedback && (
+                <p role={feedback.error ? "alert" : "status"}
+                  className={feedback.error ? "mb-4 text-sm text-[#B42318]" : "mb-4 text-sm text-brand-dark"}>
+                  {feedback.message}
+                </p>
+              )}
+
               <button
                 type="submit"
-                className="flex h-[52px] w-full items-center justify-center bg-brand px-6 text-base font-bold text-white shadow-[0_5px_0_0_#005C37]"
+                disabled={pending}
+                className="flex h-[52px] w-full items-center justify-center bg-brand px-6 text-base font-bold text-white shadow-[0_5px_0_0_#005C37] disabled:opacity-60"
               >
-                {activeTab === "signup" ? "Create account" : "Log in"}
+                {pending ? "Please wait?" : activeTab === "signup" ? "Create account" : "Log in"}
               </button>
             </form>
           </div>

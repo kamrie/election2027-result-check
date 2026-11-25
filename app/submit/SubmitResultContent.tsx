@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation";
 import { maxPhotos, maxVoteCount } from "@/lib/submission-validation";
 import type { SubmissionUnit } from "@/lib/submissions.server";
 import { compressPhoto, sendSubmission } from "./photo-client";
+import PhotoOcr from "./PhotoOcr";
+import type { OcrSuggestions, ScoreField, TotalField } from "./ocr-suggestions";
 import type { Party } from "@/lib/parties";
 
 function CameraIcon() {
@@ -96,6 +98,12 @@ function WarningIcon() {
 	);
 }
 
+const totalFields: { key: TotalField; label: string }[] = [
+	{ key: "accredited", label: "Total accredited voters" },
+	{ key: "valid", label: "Total valid votes" },
+	{ key: "rejected", label: "Total rejected votes" },
+];
+
 export default function SubmitResultContent({ parties, selectedUnit, unitRequested, alreadySubmitted, storageReady }: {
 	parties: Party[];
 	selectedUnit: SubmissionUnit | null;
@@ -111,7 +119,7 @@ export default function SubmitResultContent({ parties, selectedUnit, unitRequest
 	const [progress, setProgress] = useState<number | null>(null);
 	const [photoError, setPhotoError] = useState("");
 	const [submitError, setSubmitError] = useState("");
-	const [submitted, setSubmitted] = useState<{ message: string; unitCode: string } | null>(null);
+	const [submitted, setSubmitted] = useState<{ message: string; unitCode: string; duplicatePhoto: boolean } | null>(null);
 
 	useEffect(() => {
 		const urls = previewUrls.current;
@@ -123,13 +131,17 @@ export default function SubmitResultContent({ parties, selectedUnit, unitRequest
 
 	useEffect(() => {
 		if (!submitted) return;
-		const timer = window.setTimeout(() => router.replace("/unit/" + encodeURIComponent(submitted.unitCode)), 1800);
+		const timer = window.setTimeout(() => router.replace("/unit/" + encodeURIComponent(submitted.unitCode)), submitted.duplicatePhoto ? 5000 : 1800);
 		return () => window.clearTimeout(timer);
 	}, [router, submitted]);
-	const [scores, setScores] = useState<Record<number, string>>({});
-	const [accredited, setAccredited] = useState("");
-	const [valid, setValid] = useState("");
-	const [rejected, setRejected] = useState("");
+	const [entry, setEntry] = useState<{
+		values: Partial<Record<ScoreField, string>>;
+		suggested: Set<ScoreField>;
+		scanned: boolean;
+	}>({ values: {}, suggested: new Set(), scanned: false });
+	const [scanning, setScanning] = useState(false);
+	const { values: scores } = entry;
+	const { accredited = "", valid = "", rejected = "" } = scores;
 	const [confirmed, setConfirmed] = useState(false);
 	const [exactAsWritten, setExactAsWritten] = useState(false);
 	const wholeNumberPattern = /^\d+$/;
@@ -153,8 +165,41 @@ export default function SubmitResultContent({ parties, selectedUnit, unitRequest
 	const scoresMatch = liveCheckVisible && partyTotal === validNumber;
 	const accreditationPasses = liveCheckVisible && validPlusRejected <= accreditedNumber;
 	const rulesPass = scoresMatch && accreditationPasses;
-	const canSubmit = storageReady && !preparing && progress === null && photos.length > 0
+	const canSubmit = storageReady && !preparing && !scanning && progress === null && photos.length > 0
 		&& valuesAreWholeNumbers && confirmed && (rulesPass || exactAsWritten);
+
+	function editFigure(field: ScoreField, value: string) {
+		if (value !== "" && !wholeNumberPattern.test(value)) return;
+		setEntry((current) => {
+			const suggested = new Set(current.suggested);
+			suggested.delete(field);
+			return { ...current, suggested, values: { ...current.values, [field]: value } };
+		});
+		setConfirmed(false);
+		setExactAsWritten(false);
+	}
+
+	function applySuggestions(suggestions: OcrSuggestions) {
+		setEntry((current) => {
+			const values = { ...current.values };
+			// Keep manual entries when a new scan proposes other values.
+			for (const field of current.suggested) delete values[field];
+			const applied = new Set<ScoreField>();
+			for (const [field, value] of suggestions) {
+				if (values[field]) continue;
+				values[field] = value;
+				applied.add(field);
+			}
+			return { values, suggested: applied, scanned: true };
+		});
+		setConfirmed(false);
+		setExactAsWritten(false);
+	}
+
+	function fieldNote(field: ScoreField) {
+		if (entry.suggested.has(field)) return "Suggested from photo";
+		if (entry.scanned && !scores[field]) return "Enter manually";
+	}
 
 	async function addPhotos(files: File[]) {
 		if (!files.length || preparing) return;
@@ -229,7 +274,7 @@ export default function SubmitResultContent({ parties, selectedUnit, unitRequest
 					<h1 className="mt-5 text-[2.1rem] font-bold leading-tight text-brand md:text-[2.6rem]">
 						Result submitted
 					</h1>
-					<p className="mx-auto mt-3 max-w-[580px] text-base leading-7 text-muted">
+					<p role="status" className="mx-auto mt-3 max-w-[580px] text-base leading-7 text-muted">
 						{submitted.message} Opening the polling-unit page...
 					</p>
 					<div className="mx-auto mt-7 grid max-w-[520px] gap-3 md:grid-cols-2">
@@ -340,7 +385,7 @@ export default function SubmitResultContent({ parties, selectedUnit, unitRequest
 					<button
 						type="button"
 						onClick={() => fileInputRef.current?.click()}
-						disabled={preparing || progress !== null || photos.length >= maxPhotos}
+						disabled={preparing || scanning || progress !== null || photos.length >= maxPhotos}
 						className="mt-3 flex h-[132px] w-full flex-col items-center justify-center border-2 border-dashed border-brand bg-[#F7FAF8] px-4 text-brand"
 					>
 						<CameraIcon />
@@ -372,7 +417,7 @@ export default function SubmitResultContent({ parties, selectedUnit, unitRequest
 											type="button"
 											aria-label={`Remove photo ${index + 1}`}
 											onClick={() => removePhoto(photo.url)}
-										disabled={preparing || progress !== null}
+										disabled={preparing || scanning || progress !== null}
 											className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center bg-white text-ink shadow-[0_3px_8px_rgba(0,0,0,0.18)]"
 										>
 											<svg
@@ -397,6 +442,8 @@ export default function SubmitResultContent({ parties, selectedUnit, unitRequest
 							</p>
 						</div>
 					)}
+					<PhotoOcr photos={photos} parties={parties} disabled={preparing || progress !== null}
+						onSuggestions={applySuggestions} onRunningChange={setScanning} />
 				</section>
 
 				<section className="mt-7">
@@ -409,7 +456,7 @@ export default function SubmitResultContent({ parties, selectedUnit, unitRequest
 							return (
 								<div
 									key={party.id}
-									className="grid h-[68px] grid-cols-[1fr_112px] items-center border-b border-line md:grid-cols-[1fr_140px]"
+									className="grid min-h-[68px] grid-cols-[1fr_112px] items-center border-b border-line py-2 md:grid-cols-[1fr_140px]"
 								>
 									<label
 										htmlFor={`score-${party.id}`}
@@ -419,6 +466,7 @@ export default function SubmitResultContent({ parties, selectedUnit, unitRequest
 										<span className="ml-1 font-medium text-muted">
 											({party.abbreviation})
 										</span>
+										{fieldNote(party.id) && <span className="block text-xs font-medium text-muted">{fieldNote(party.id)}</span>}
 									</label>
 									<input
 										id={`score-${party.id}`}
@@ -428,14 +476,8 @@ export default function SubmitResultContent({ parties, selectedUnit, unitRequest
 										max={maxVoteCount}
 										disabled={progress !== null}
 										value={score}
-										onChange={(event) => {
-											const next = event.target.value;
-											if (next === "" || /^\d+$/.test(next)) {
-												setScores((current) => ({ ...current, [party.id]: next }));
-												setExactAsWritten(false);
-											}
-										}}
-										className={`h-[52px] w-full border bg-white px-3 text-right text-base font-bold text-ink outline-none ${
+										onChange={(event) => editFigure(party.id, event.target.value)}
+										className={`h-[52px] w-full border px-3 text-right text-base font-bold text-ink outline-none ${entry.suggested.has(party.id) ? "bg-[#EEF8F1]" : "bg-white"} ${
 											liveCheckVisible && !scoresMatch
 												? "border-[#B42318]"
 												: "border-line focus:border-brand"
@@ -451,25 +493,14 @@ export default function SubmitResultContent({ parties, selectedUnit, unitRequest
 					</p>
 
 					<div className="mt-3 grid gap-4 md:grid-cols-3">
-						{[
-							{
-								label: "Total accredited voters",
-								value: accredited,
-								setter: setAccredited,
-							},
-							{ label: "Total valid votes", value: valid, setter: setValid },
-							{
-								label: "Total rejected votes",
-								value: rejected,
-								setter: setRejected,
-							},
-						].map((field) => (
+						{totalFields.map((field) => (
 							<div key={field.label}>
 								<label
 									className="mb-2 block text-sm font-bold leading-5 text-ink"
 									htmlFor={field.label}
 								>
 									{field.label}
+									{fieldNote(field.key) && <span className="block text-xs font-medium text-muted">{fieldNote(field.key)}</span>}
 								</label>
 								<input
 									id={field.label}
@@ -478,19 +509,13 @@ export default function SubmitResultContent({ parties, selectedUnit, unitRequest
 									min="0"
 										max={maxVoteCount}
 										disabled={progress !== null}
-									value={field.value}
-									onChange={(event) => {
-										const next = event.target.value;
-										if (next === "" || /^\d+$/.test(next)) {
-											field.setter(next);
-											setExactAsWritten(false);
-										}
-									}}
-									className={`h-[52px] w-full border bg-white px-3 text-base font-bold text-ink outline-none ${
+									value={scores[field.key] ?? ""}
+									onChange={(event) => editFigure(field.key, event.target.value)}
+									className={`h-[52px] w-full border px-3 text-base font-bold text-ink outline-none ${entry.suggested.has(field.key) ? "bg-[#EEF8F1]" : "bg-white"} ${
 										liveCheckVisible &&
-										(field.label === "Total valid votes" && !scoresMatch
+										(field.key === "valid" && !scoresMatch
 											? true
-											: field.label === "Total accredited voters" && !accreditationPasses)
+											: field.key === "accredited" && !accreditationPasses)
 											? "border-[#B42318]"
 											: "border-line focus:border-brand"
 									}`}
@@ -542,7 +567,7 @@ export default function SubmitResultContent({ parties, selectedUnit, unitRequest
 							className="mt-0.5 h-5 w-5 shrink-0 accent-[#008751]"
 						/>
 						<span className="text-sm font-medium leading-6 text-ink md:text-base">
-							I confirm these numbers match the signed result sheet at my polling unit.
+							{entry.scanned ? "I reviewed the figures against the signed result sheet and confirm they match." : "I confirm these numbers match the signed result sheet at my polling unit."}
 						</span>
 					</label>
 

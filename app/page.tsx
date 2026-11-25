@@ -1,5 +1,8 @@
 import Link from "next/link";
+import { Suspense } from "react";
+import { getPublicResults } from "@/lib/public-results.server";
 import { StatCard } from "@/components/StatCard";
+import { brandTagline } from "@/lib/brand";
 
 const steps = [
   {
@@ -30,7 +33,7 @@ export default function Home() {
           </div>
 
           <h1 className="mt-4 max-w-[12ch] text-[2.8rem] font-bold leading-[1.1] text-brand md:text-[3.4rem] lg:text-[4.4rem]">
-            Your unit&apos;s result. Checked.
+            {brandTagline}
           </h1>
 
           <p className="mt-4 max-w-[28rem] text-base font-normal leading-7 text-muted md:text-lg">
@@ -55,8 +58,9 @@ export default function Home() {
         </section>
 
         <aside className="mt-8 grid grid-cols-2 gap-3 lg:mt-0 lg:grid-cols-1 lg:items-center lg:gap-4">
-          <StatCard label="Units covered" value={0} />
-          <StatCard label="Mismatches found" value={0} />
+          <Suspense fallback={<p role="status" className="col-span-full text-muted">Loading statistics...</p>}>
+            <HomeStats />
+          </Suspense>
         </aside>
       </div>
 
@@ -114,4 +118,13 @@ export default function Home() {
       </div>
     </main>
   );
+}
+
+async function HomeStats() {
+  const report = await getPublicResults().catch(() => null);
+  if (!report) return <p role="alert" className="col-span-full text-muted">Statistics are temporarily unavailable.</p>;
+  return <>
+    <StatCard label="Units covered" value={report.stats.covered.toLocaleString("en-NG")} />
+    <StatCard label="Mismatches found" value={report.stats.mismatches.toLocaleString("en-NG")} />
+  </>;
 }

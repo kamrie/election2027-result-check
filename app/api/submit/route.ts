@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { getAuthenticatedUser } from "@/lib/auth";
 import { authResponse, authUnavailable, sameOrigin } from "@/lib/auth-request";
 import { authRetryAfter } from "@/lib/auth-rate-limit";
+import { hashPhoto } from "@/lib/photo-evidence.mjs";
 import { getActiveParties } from "@/lib/parties.server";
 import { findSubmissionUnit, hasSubmitted, saveSubmission, SubmissionCommitError } from "@/lib/submissions.server";
 import { hasPhotoStorage, photoId, removePhotos, storageUnavailable, uploadPhoto, validatePhoto } from "@/lib/submission-photos.server";
@@ -85,6 +86,9 @@ export async function POST(request: NextRequest) {
     }
     if (!hasPhotoStorage()) return authResponse({ error: storageUnavailable }, 503);
 
+    const hashes = [];
+    for (const buffer of buffers) hashes.push(await hashPhoto(buffer));
+
     const urls: string[] = [];
     uploading = true;
     for (const buffer of buffers) {
@@ -94,8 +98,11 @@ export async function POST(request: NextRequest) {
     }
     uploading = false;
 
-    await saveSubmission(user.id, unit.id, data, urls);
-    return authResponse({ message: data.sheetDoesNotAddUp ? "Result submitted and flagged for review." : "Result submitted.",
+    const { duplicatePhoto } = await saveSubmission(user.id, unit.id, data, urls, hashes);
+    const message = duplicatePhoto
+      ? "Possible duplicate photo detected. Your result was saved and flagged for review."
+      : data.sheetDoesNotAddUp ? "Result submitted and flagged for review." : "Result submitted.";
+    return authResponse({ message, duplicatePhoto,
       unitCode: unit.code }, 201);
   } catch (error) {
     if (!(error instanceof SubmissionCommitError)) await removePhotos(ids);

@@ -1,14 +1,20 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
 import { getAuthenticatedUser } from "@/lib/auth";
+import { brandName, brandTagline } from "@/lib/brand";
 import "./globals.css";
 import "@fontsource-variable/montserrat";
 import { SiteFooter } from "@/components/SiteFooter";
 import { SiteHeader } from "@/components/SiteHeader";
 
+const description = `${brandTagline} Compare polling unit results with the IReV portal.`;
+
 export const metadata: Metadata = {
-  title: "Result Check",
-  description: "Compare polling unit results with the IReV portal.",
+  title: brandName,
+  applicationName: brandName,
+  description,
+  openGraph: { type: "website", siteName: brandName, title: brandName, description },
+  twitter: { card: "summary", title: brandName, description },
 };
 
 export default function RootLayout({

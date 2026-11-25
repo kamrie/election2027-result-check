@@ -4,6 +4,7 @@ import { getAuthenticatedUser } from "@/lib/auth";
 import { loginDestination, type DestinationParams } from "@/lib/auth-destination";
 import { getActiveParties, isPartyFallback, partiesLoadError } from "@/lib/parties.server";
 import AdminContent from "./AdminContent";
+import PhotoReview from "./PhotoReview";
 
 export default function AdminPage({ searchParams }: { searchParams: Promise<DestinationParams> }) {
   return (
@@ -37,7 +38,7 @@ async function PageContent({ searchParams }: { searchParams: Promise<Destination
   return (
     <>
       {isPartyFallback(parties) && <p role="alert" className="px-4 py-4 text-muted">{partiesLoadError}</p>}
-      <AdminContent parties={parties} />
+      <AdminContent parties={parties} photoReview={<Suspense fallback={<p className="mt-5 text-muted">Loading photo flags...</p>}><PhotoReview /></Suspense>} />
     </>
   );
 }

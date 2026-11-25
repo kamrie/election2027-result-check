@@ -25,7 +25,7 @@ export async function compressPhoto(file: File) {
 }
 
 export function sendSubmission(form: FormData, onProgress: (percent: number) => void) {
-  return new Promise<{ message: string; unitCode: string }>((resolve, reject) => {
+  return new Promise<{ message: string; unitCode: string; duplicatePhoto: boolean }>((resolve, reject) => {
     const request = new XMLHttpRequest();
     request.open("POST", "/api/submit");
     request.responseType = "json";
@@ -36,7 +36,7 @@ export function sendSubmission(form: FormData, onProgress: (percent: number) => 
     request.upload.onload = () => onProgress(100);
     request.onload = () => {
       const response = request.response;
-      if (request.status === 201 && typeof response?.unitCode === "string" && typeof response?.message === "string") {
+      if (request.status === 201 && typeof response?.unitCode === "string" && typeof response?.message === "string" && typeof response?.duplicatePhoto === "boolean") {
         resolve(response);
       } else {
         reject(new Error(typeof response?.error === "string" ? response.error : "Could not submit the result. Try again."));

@@ -1,4 +1,6 @@
-export function Logo() {
+import { brandName, brandTagline } from "@/lib/brand";
+
+export function Logo({ votingCard = false }: { votingCard?: boolean }) {
   return (
     <div className="flex items-center gap-3">
       <svg
@@ -16,8 +18,9 @@ export function Logo() {
           <path d="M21 6L27 26" />
         </g>
       </svg>
-      <span className="text-[1.1rem] font-bold text-brand-dark">
-        Result Check
+      <span className="text-[1.1rem] font-bold text-brand-dark leading-tight">
+        {brandName}
+        {votingCard && <span className="block text-[0.65rem] font-semibold text-muted">{brandTagline}</span>}
       </span>
     </div>
   );

@@ -16,6 +16,7 @@ export function SiteHeader({ authenticated = false }: { authenticated?: boolean 
 	const navItems = [...publicLinks, { label: authenticated ? "Account" : "Log in", href: "/login?tab=login" }];
 	const [isMenuOpen, setIsMenuOpen] = useState(false);
 	const pathname = usePathname();
+	const isCardPage = pathname === "/ive-voted";
 
 	useEffect(() => {
 		const handleEscape = (event: KeyboardEvent) => {
@@ -34,7 +35,7 @@ export function SiteHeader({ authenticated = false }: { authenticated?: boolean 
 
 			<header className="mx-auto max-w-6xl border-b border-line bg-white px-4 shadow-[0_8px_12px_-8px_rgba(0,0,0,0.3)] md:border-x md:border-line md:px-8 lg:px-10">
 				<div className="mx-auto flex max-w-6xl items-center justify-between py-4">
-					<Logo />
+					<Logo votingCard={isCardPage} />
 
 					<nav className="hidden items-center gap-8 text-sm text-ink lg:flex">
 						{navItems.map((item) => (

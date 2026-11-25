@@ -1,41 +1,22 @@
 import Link from "next/link";
 import { Suspense } from "react";
-import { fakeLocations } from "@/lib/fake-locations";
-import { getActiveParties, isPartyFallback, partiesLoadError } from "@/lib/parties.server";
-import { StatusTag, type StatusKey } from "@/components/StatusTag";
+import { StatusTag } from "@/components/StatusTag";
+import { pollingUnitCode } from "@/lib/submission-validation";
+import { findSubmissionUnit } from "@/lib/submissions.server";
+import { compareTallies } from "@/lib/irev";
+import { getIrevResult } from "@/lib/irev.server";
+import { getActiveParties } from "@/lib/parties.server";
+import { getUnitVerification } from "@/lib/unit-verification.server";
 
 export const instant = false;
 
-const statusStyles: Record<
-	string,
-	{ label: string; className: string; description: string }
-> = {
-	none: {
-		label: "No results yet",
-		className: "border border-[#D9DDDA] bg-[#E7EAE8] text-[#5A6560]",
-		description: "No submissions have been made for this polling unit.",
-	},
-	unverified: {
-		label: "Unverified",
-		className: "border border-[#D8B34A] bg-[#FFF3C7] text-[#6B5310]",
-		description:
-			"One person has submitted. It becomes Confirmed when a second person submits the same scores.",
-	},
-	confirmed: {
-		label: "Confirmed",
-		className: "border border-[#A8D2B8] bg-[#DDF1E4] text-brand-dark",
-		description: "Two people submitted the same scores. Waiting for the IReV result.",
-	},
-	mismatch: {
-		label: "Mismatch",
-		className: "border border-[#B42318] bg-[#FDE7E5] text-[#B42318]",
-		description: "Our submitted scores do not match the IReV result entered for this unit.",
-	},
-	matches: {
-		label: "Matches IReV",
-		className: "border border-[#005C37] bg-[#008751] text-white",
-		description: "The submitted scores match the IReV result.",
-	},
+const descriptions = {
+	"no-results": "No submissions have been made for this polling unit.",
+	unverified: "Submissions are awaiting another eligible match or evidence review.",
+	confirmed: "At least two accounts submitted matching scores and totals with no unresolved evidence flags.",
+	conflicting: "Eligible submissions disagree on scores or vote totals.",
+	matches: "The confirmed scores and vote totals match the entered IReV result.",
+	mismatch: "The confirmed tally differs from the entered IReV result. Differences are highlighted below.",
 };
 
 function ShieldIcon() {
@@ -63,107 +44,47 @@ function ShieldIcon() {
 	);
 }
 
-function CheckIcon() {
+export default function UnitPage({ params }: { params: Promise<{ CODE: string }> }) {
 	return (
-		<svg
-			aria-hidden="true"
-			viewBox="0 0 24 24"
-			className="h-4 w-4"
-			fill="none"
-		>
-			<circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.8" />
-			<path
-				d="M8 12L10.75 14.75L16 9.5"
-				stroke="currentColor"
-				strokeWidth="1.8"
-				strokeLinecap="square"
-				strokeLinejoin="round"
-			/>
-		</svg>
-	);
-}
-
-export default async function UnitPage({
-	params,
-	searchParams,
-}: {
-	params: Promise<{ CODE: string }>;
-	searchParams: Promise<{ state?: string }>;
-}) {
-	return (
-		<Suspense fallback={<p className="px-4 py-10 text-muted">Loading parties?</p>}>
-			<UnitPageContent params={params} searchParams={searchParams} />
+		<Suspense fallback={<p className="px-4 py-10 text-muted">Loading polling unit...</p>}>
+			<UnitPageContent params={params} />
 		</Suspense>
 	);
 }
 
-async function UnitPageContent({
-	params,
-	searchParams,
-}: {
-	params: Promise<{ CODE: string }>;
-	searchParams: Promise<{ state?: string }>;
-}) {
+async function UnitPageContent({ params }: { params: Promise<{ CODE: string }> }) {
 	const { CODE } = await params;
-	const { state = "none" } = await searchParams;
-	const code = decodeURIComponent(CODE);
-	let activeParties;
-	try {
-		activeParties = await getActiveParties();
-	} catch {
-		return <p role="alert" className="px-4 py-10 text-muted">{partiesLoadError}</p>;
+	const code = pollingUnitCode.safeParse(CODE);
+	const selectedUnit = code.success ? await findSubmissionUnit(code.data).catch(() => undefined) : null;
+	if (selectedUnit === undefined) {
+		return <p role="alert" className="px-4 py-10 text-muted">Could not load this polling unit. Try again.</p>;
+	}
+	if (!selectedUnit) {
+		return (
+			<main className="px-4 py-10">
+				<h1 className="text-2xl font-bold text-brand">Polling unit not found</h1>
+				<Link href="/find-unit" className="mt-4 inline-block font-bold text-brand underline">Find another unit</Link>
+			</main>
+		);
 	}
 
-	const parties = activeParties.map((party, index) => {
-		const our = Math.max(0, 82 - index * 3);
-		return { ...party, our, ireV: index === 1 ? 62 : our };
-	});
-	const valid = parties.reduce((total, party) => total + party.our, 0);
-	const rejected = 8;
-
-	let unit = null as null | {
-		name: string;
-		code: string;
-		ward: string;
-		lga: string;
-		state: string;
-	};
-	for (const locationState of fakeLocations) {
-		for (const lga of locationState.lgas) {
-			for (const ward of lga.wards) {
-				const found = ward.units.find((item) => item.code === code);
-				if (found) {
-					unit = {
-						name: found.name,
-						code: found.code,
-						ward: ward.name,
-						lga: lga.name,
-						state: locationState.name,
-					};
-					break;
-				}
-			}
-			if (unit) break;
-		}
-		if (unit) break;
+	const verification = await getUnitVerification(selectedUnit.id).catch(() => null);
+	if (!verification) {
+		return <p role="alert" className="px-4 py-10 text-muted">Could not load the submitted results. Try again.</p>;
 	}
-
-	const selectedUnit =
-		unit ?? {
-			name: "Polling unit",
-			code,
-			ward: "Ward",
-			lga: "LGA",
-			state: "State",
-		};
-	const status = statusStyles[state] ?? statusStyles.none;
-	const noResults = state === "none";
-	const unverified = state === "unverified";
-	const showIReV = state === "mismatch" || state === "matches";
+	const { result } = verification;
+	const comparison = result && verification.status === "confirmed"
+		? await (async () => {
+			const irev = await getIrevResult(selectedUnit.id);
+			if (!irev) return null;
+			const parties = await getActiveParties(false);
+			return compareTallies(result, irev, parties);
+		})().catch(() => undefined)
+		: null;
+	const status = comparison?.status ?? verification.status;
 
 	return (
 		<main className="px-4 pb-10 pt-6 md:px-8 lg:px-10">
-			{isPartyFallback(activeParties) && <p role="alert" className="mb-4 text-muted">{partiesLoadError}</p>}
 			<div className="mx-auto max-w-[760px]">
 				<nav
 					aria-label="Breadcrumb"
@@ -188,259 +109,101 @@ async function UnitPageContent({
 						{selectedUnit.state}
 					</p>
 					<div className="mt-4">
-						<StatusTag
-							status={(state === "none" ? "no-results" : state) as StatusKey}
-						/>
+						<StatusTag status={status} />
 					</div>
 					<p className="mt-3 max-w-[650px] text-sm leading-6 text-muted md:text-base">
-						{status.description}
-					</p>
-					<p className="mt-1 text-xs font-medium text-muted">
-						Sample data — for demonstration only.
+						{descriptions[status]}
 					</p>
 				</div>
 
-				{!noResults && (
-					<>
-						<section className="mt-7">
-							<h2 className="text-xl font-bold text-brand">
-								Submitted scores
-							</h2>
-							<div className="mt-3 overflow-hidden border border-line">
-								<table className="w-full border-collapse text-sm">
-									<tbody>
-										{parties.map((party) => (
-											<tr
-												key={party.id}
-												className="border-b border-line last:border-b-0"
-											>
-												<th
-													scope="row"
-													className="px-3 py-3 text-left font-bold text-ink md:px-4"
-												>
-													{party.name}{" "}
-													<span className="ml-1 font-medium text-muted">
-														({party.abbreviation})
-													</span>
-												</th>
-												<td className="px-3 py-3 text-right font-bold text-ink md:px-4">
-													{party.our}
-												</td>
-											</tr>
-										))}
-										{[
-											["Total accredited voters", String(valid + rejected)],
-											["Total valid votes", String(valid)],
-											["Total rejected votes", String(rejected)],
-										].map(([label, score]) => (
-											<tr key={label} className="border-t border-line bg-[#F7FAF8]">
-												<th
-													scope="row"
-													className="px-3 py-3 text-left font-bold text-ink md:px-4"
-												>
-													{label}
-												</th>
-												<td className="px-3 py-3 text-right font-bold text-ink md:px-4">
-													{score}
-												</td>
-											</tr>
-										))}
-									</tbody>
-								</table>
-							</div>
-							<p className="mt-2 text-xs font-medium text-muted">
-								Based on {unverified ? "1 submission" : "2 submissions"}.
-							</p>
-						</section>
-
-						<section className="mt-7">
-							<h2 className="text-xl font-bold text-brand">
-								Comparison with IReV
-							</h2>
-							{showIReV ? (
-								<div className="mt-3 overflow-x-auto border border-line">
-									<table className="w-full min-w-[560px] border-collapse text-sm">
-										<thead className="bg-[#F7FAF8]">
-											<tr className="border-b border-line">
-												<th className="px-3 py-3 text-left font-bold text-ink">
-													Party
-												</th>
-												<th className="px-3 py-3 text-right font-bold text-ink">
-													Our scores
-												</th>
-												<th className="px-3 py-3 text-right font-bold text-ink">
-													IReV scores
-												</th>
-												<th className="px-3 py-3 text-right font-bold text-ink">
-													Difference
-												</th>
-											</tr>
-										</thead>
-										<tbody>
-											{parties.map((party) => {
-												const differs = party.our !== party.ireV;
-												const difference = party.our - party.ireV;
-												return (
-													<tr
-														key={party.id}
-														className={`border-b border-line last:border-b-0 ${
-															differs ? "bg-[#FDE7E5]" : "bg-white"
-														}`}
-													>
-														<th
-															scope="row"
-															className="px-3 py-3 text-left font-bold text-ink"
-														>
-															{party.name}{" "}
-															<span className="font-medium text-muted">
-																({party.abbreviation})
-															</span>
-														</th>
-														<td className="px-3 py-3 text-right font-bold text-ink">
-															{party.our}
-														</td>
-														<td className="px-3 py-3 text-right font-bold text-ink">
-															{party.ireV}
-														</td>
-														<td
-															className={`px-3 py-3 text-right font-bold ${
-																differs
-																	? "text-[#B42318]"
-																	: "text-brand"
-															}`}
-														>
-															{differs ? (
-																difference > 0
-																	? `+${difference}`
-																	: difference
-															) : (
-																<span className="flex justify-end">
-																	<CheckIcon />
-																</span>
-															)}
-														</td>
-													</tr>
-												);
-											})}
-										</tbody>
-									</table>
-								</div>
-							) : (
-								<div className="mt-3 border border-line bg-[#E7EAE8] px-4 py-4 text-sm font-medium text-muted">
-									IReV result not yet entered for this unit.
-								</div>
-							)}
-						</section>
-
-						<section className="mt-7">
-							<h2 className="text-xl font-bold text-brand">
-								Result sheet photos
-							</h2>
-							<div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-3">
-								{[1, 2, 3].map((photo) => (
-									<details
-										key={photo}
-										className="group border border-line bg-white"
-									>
-										<summary className="cursor-pointer list-none">
-											<div className="flex h-[112px] items-center justify-center bg-[#EEF1EF] md:h-[128px]">
-												<div className="h-[84px] w-[68px] border border-[#C7CECA] bg-white p-2 shadow-[0_4px_8px_-4px_rgba(0,0,0,0.25)]">
-													<div className="h-2 w-full bg-brand" />
-													<div className="mt-2 h-1 w-10 bg-[#D9DDDA]" />
-													<div className="mt-2 h-1 w-12 bg-[#D9DDDA]" />
-													<div className="mt-2 h-1 w-8 bg-[#D9DDDA]" />
-												</div>
-											</div>
-											<p className="px-2 py-2 text-xs leading-5 text-muted">
-												Photo {photo}, submitted 25 Jan, 4:
-												{photo === 1
-													? "12"
-													: photo === 2
-													? "18"
-													: "24"}
-												pm
-											</p>
-										</summary>
-										<div className="border-t border-line p-3">
-											<div className="flex h-[260px] items-center justify-center bg-[#EEF1EF]">
-												<div className="h-[220px] w-[170px] border border-[#C7CECA] bg-white p-4">
-													<div className="h-3 w-full bg-brand" />
-													<div className="mt-4 h-2 w-full bg-[#D9DDDA]" />
-													<div className="mt-3 h-2 w-32 bg-[#D9DDDA]" />
-													<div className="mt-3 h-2 w-28 bg-[#D9DDDA]" />
-													<div className="mt-3 h-2 w-36 bg-[#D9DDDA]" />
-												</div>
-											</div>
-										</div>
-									</details>
-								))}
-							</div>
-						</section>
-
-						<section className="mt-7">
-							<h2 className="text-xl font-bold text-brand">Submissions</h2>
-							<div className="mt-3 grid gap-3">
-								{[1, 2]
-									.slice(0, unverified ? 1 : 2)
-									.map((submission) => (
-										<details
-											key={submission}
-											className="border border-line bg-white"
-										>
-											<summary className="flex cursor-pointer list-none items-start justify-between gap-3 px-4 py-4">
-												<div>
-													<p className="text-sm font-bold text-ink">
-														Volunteer {submission}
-													</p>
-													<p className="mt-1 text-xs text-muted">
-														Submitted 25 Jan,{" "}
-														{submission === 1
-															? "4:12 pm"
-															: "5:06 pm"}
-													</p>
-													<Link
-														href="#"
-														className="mt-1 inline-block text-xs font-bold text-brand underline underline-offset-4"
-													>
-														Report a problem
-													</Link>
-												</div>
-												<span className="text-sm font-bold text-brand">
-													Scores
-												</span>
-											</summary>
-											<div className="border-t border-line px-4 py-3 text-sm">
-												{parties.map((party) => (
-													<p
-														key={party.id}
-														className="flex justify-between border-b border-line py-2 last:border-b-0"
-													>
-														<span>
-															{party.name} ({party.abbreviation})
-														</span>
-														<strong>{party.our}</strong>
-													</p>
-												))}
-												<p className="mt-2 text-xs text-muted">
-													Accredited 420 · Valid 412 · Rejected 8
-												</p>
-												<Link
-													href="/report"
-													className="mt-3 inline-block text-sm font-bold text-brand underline underline-offset-4"
-												>
-													Report a problem
-												</Link>
-											</div>
-										</details>
+				{comparison === undefined && (
+					<p role="alert" className="mt-5 text-sm text-muted">Could not load the IReV comparison. Try again.</p>
+				)}
+				{comparison && (
+					<section className="mt-7">
+						<h2 className="text-xl font-bold text-brand">IReV comparison</h2>
+						<div className="mt-3 overflow-x-auto border border-line">
+							<table className="w-full min-w-[440px] border-collapse text-sm">
+								<thead className="bg-[#EEF0EF]">
+									<tr>
+										<th scope="col" className="px-3 py-3 text-left">Field</th>
+										<th scope="col" className="px-3 py-3 text-right">Ours</th>
+										<th scope="col" className="px-3 py-3 text-right">IReV</th>
+										<th scope="col" className="px-3 py-3 text-right" title="Our confirmed value minus IReV">Diff</th>
+									</tr>
+								</thead>
+								<tbody>
+									{comparison.rows.map(({ key, label, ours, irev, differs, difference }) => (
+										<tr key={key} className={"border-t border-line " + (differs ? "bg-[#FEE4E2]" : "bg-white")}>
+											<th scope="row" className="px-3 py-3 text-left font-bold text-ink">{label}</th>
+											<td className="px-3 py-3 text-right">{ours ?? "Missing"}</td>
+											<td className="px-3 py-3 text-right">{irev ?? "Missing"}</td>
+											<td className={"px-3 py-3 text-right font-bold " + (differs ? "text-[#B42318]" : "text-muted")}>{difference ?? "Missing"}</td>
+										</tr>
 									))}
-							</div>
-						</section>
-					</>
+								</tbody>
+							</table>
+						</div>
+						<p className="mt-2 text-xs font-medium text-muted">Diff is our confirmed value minus IReV.</p>
+					</section>
 				)}
 
-				{noResults && (
+				{result && !comparison && (
+					<section className="mt-7">
+						<h2 className="text-xl font-bold text-brand">
+							Submitted scores
+						</h2>
+						<div className="mt-3 overflow-hidden border border-line">
+							<table className="w-full border-collapse text-sm">
+								<tbody>
+									{result.scores.map((party) => (
+										<tr
+											key={party.partyId}
+											className="border-b border-line last:border-b-0"
+										>
+											<th
+												scope="row"
+												className="px-3 py-3 text-left font-bold text-ink md:px-4"
+											>
+												{party.name}{" "}
+												<span className="ml-1 font-medium text-muted">
+													({party.abbreviation})
+												</span>
+											</th>
+											<td className="px-3 py-3 text-right font-bold text-ink md:px-4">
+												{party.score}
+											</td>
+										</tr>
+									))}
+									{[
+										["Total accredited voters", result.accredited],
+										["Total valid votes", result.valid],
+										["Total rejected votes", result.rejected],
+									].map(([label, score]) => (
+										<tr key={label} className="border-t border-line bg-[#F7FAF8]">
+											<th
+												scope="row"
+												className="px-3 py-3 text-left font-bold text-ink md:px-4"
+											>
+												{label}
+											</th>
+											<td className="px-3 py-3 text-right font-bold text-ink md:px-4">
+												{score}
+											</td>
+										</tr>
+									))}
+								</tbody>
+							</table>
+						</div>
+						<p className="mt-2 text-xs font-medium text-muted">
+							Based on {result.count} eligible {result.count === 1 ? "submission" : "submissions"}.
+						</p>
+					</section>
+				)}
+
+				{!result && status !== "no-results" && (
 					<div className="mt-7 border border-line bg-[#F7FAF8] p-5 text-sm leading-6 text-muted">
-						No submitted scores or photos are available for this unit yet.
+						There is no publishable tally for this unit yet.
 					</div>
 				)}
 
@@ -468,6 +231,10 @@ async function UnitPageContent({
 						We never ask who you voted for.
 					</p>
 				</aside>
+
+				<Link href="/ive-voted" className="mt-6 inline-block text-sm font-bold text-brand underline underline-offset-4">
+					Make an I&apos;ve voted card
+				</Link>
 			</div>
 		</main>
 	);
